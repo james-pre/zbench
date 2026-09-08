@@ -25,6 +25,10 @@
 		"dist",
 		"LICENSE.md"
 	],
+	"publishConfig": {
+		"access": "public",
+		"provenance": true
+	},
 	"scripts": {
 		"format:check": "prettier --check .",
 		"format": "prettier --write .",
