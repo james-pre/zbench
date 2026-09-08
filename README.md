@@ -8,7 +8,7 @@ write a `test` function, and it handles iteration, measurement, machine gating, 
 and comparison across git references.
 
 ```
-npm i -D zbench
+npm i -D zbench-js
 ```
 
 ## The shape of a suite
