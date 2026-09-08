@@ -1,0 +1,72 @@
+{
+	"name": "zbench",
+	"version": "0.1.0",
+	"description": "Data-driven, reproducible performance testing",
+	"funding": {
+		"type": "individual",
+		"url": "https://github.com/sponsors/james-pre"
+	},
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"type": "module",
+	"keywords": [
+		"benchmark",
+		"performance",
+		"testing"
+	],
+	"exports": {
+		".": "./dist/index.js",
+		"./*": "./dist/*.js"
+	},
+	"bin": {
+		"zbench": "dist/cli.js"
+	},
+	"files": [
+		"dist",
+		"LICENSE.md"
+	],
+	"scripts": {
+		"format:check": "prettier --check .",
+		"format": "prettier --write .",
+		"lint": "tsc --noEmit && eslint src",
+		"build": "tsc -b",
+		"test": "node --test test/**/*.test.ts",
+		"prepublishOnly": "npx tsc"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/james-pre/zbench.git"
+	},
+	"author": "James Prevett <jp@jamespre.dev> (https://jamespre.dev)",
+	"license": "LGPL-3.0-or-later",
+	"bugs": {
+		"url": "https://github.com/james-pre/zbench/issues"
+	},
+	"homepage": "https://github.com/james-pre/zbench#readme",
+	"devDependencies": {
+		"@eslint/js": "^10.0.1",
+		"@types/node": "^26.0.0",
+		"eslint": "^10.1.0",
+		"globals": "^17.8.0",
+		"prettier": "^3.2.5",
+		"typedoc": "^0.28.18",
+		"typescript": "^6.0.0",
+		"typescript-eslint": "^8.58.0"
+	},
+	"dependencies": {
+		"ioium": "^1.8.0",
+		"utilium": "^3.0.0"
+	},
+	"engines": {
+		"node": ">=22.18.0"
+	},
+	"prettier": {
+		"singleQuote": true,
+		"useTabs": true,
+		"trailingComma": "es5",
+		"tabWidth": 4,
+		"printWidth": 120,
+		"arrowParens": "avoid",
+		"experimentalOperatorPosition": "start"
+	}
+}

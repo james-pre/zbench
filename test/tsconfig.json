@@ -1,0 +1,10 @@
+{
+	"extends": "../tsconfig.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"rootDir": "..",
+		// Node strips types rather than resolving them, so tests import by real path
+		"allowImportingTsExtensions": true
+	},
+	"include": ["**/*.ts"]
+}

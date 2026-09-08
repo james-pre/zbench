@@ -1,0 +1,6 @@
+{
+	"editor.defaultFormatter": "esbenp.prettier-vscode",
+	"editor.formatOnSave": true,
+	"cSpell.words": ["ioium", "timespan", "typedoc", "zbench"],
+	"js/ts.tsdk.path": "node_modules/typescript/lib"
+}
