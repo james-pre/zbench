@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
+/** Timespans from shortest to longest. */
+export const timespanOrder = ['ns', 'us', 'ms', 's'] as const;
+
 /** A unit of time a measurement can be expressed in. */
-export type Timespan = 'ns' | 'us' | 'ms' | 's';
+export type Timespan = (typeof timespanOrder)[number];
 
 /** Milliseconds in each timespan, since every duration is measured in milliseconds. */
 export const timespans = { ns: 1e-6, us: 1e-3, ms: 1, s: 1e3 } as const satisfies Record<Timespan, number>;
-
-/** Timespans from shortest to longest. */
-export const timespanOrder = ['ns', 'us', 'ms', 's'] as const;
 
 export function isTimespan(value: unknown): value is Timespan {
 	return typeof value == 'string' && value in timespans;

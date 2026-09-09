@@ -97,15 +97,10 @@ if (opts.quiet) {
 	io.jobs.useClear(ignore);
 }
 
-function fail(message: string): never {
-	io.error(message);
-	process.exit(1);
-}
-
 function number(value: string | undefined, name: string): number | undefined {
 	if (value === undefined) return undefined;
 	const parsed = Number(value);
-	if (!Number.isFinite(parsed)) fail(`--${name} expects a number, got ${JSON.stringify(value)}`);
+	if (!Number.isFinite(parsed)) io.exit(`--${name} expects a number, got ${JSON.stringify(value)}`);
 	return parsed;
 }
 
@@ -114,7 +109,7 @@ function parseFlagOverrides(entries: string[]): Record<string, unknown[]> {
 	const overrides: Record<string, unknown[]> = {};
 	for (const entry of entries) {
 		const at = entry.indexOf('=');
-		if (at < 0) fail(`--flag expects name=value, got ${JSON.stringify(entry)}`);
+		if (at < 0) io.exit(`--flag expects name=value, got ${JSON.stringify(entry)}`);
 		const name = entry.slice(0, at);
 		const raw = entry.slice(at + 1);
 		let value: unknown;
@@ -129,20 +124,20 @@ function parseFlagOverrides(entries: string[]): Record<string, unknown[]> {
 }
 
 const configPath = opts.config ? resolve(opts.config) : findConfig();
-if (!configPath) fail('no config file found; pass --config or add one at tests/perf/config.json');
+if (!configPath) io.exit('no config file found; pass --config or add one at tests/perf/config.json');
 
 let suite: Suite;
 try {
 	suite = loadSuite(configPath);
-} catch (e: any) {
-	fail(e.message);
+} catch (e) {
+	io.exit(e);
 }
 
 if (filters.length) {
 	const matches = (test: Test) =>
 		filters.some(f => test.name.toLowerCase().includes(f.toLowerCase()) || test.path.includes(f));
 	suite.tests = suite.tests.filter(matches);
-	if (!suite.tests.length) fail(`no test matches ${filters.map(f => JSON.stringify(f)).join(', ')}`);
+	if (!suite.tests.length) io.exit(`no test matches ${filters.map(f => JSON.stringify(f)).join(', ')}`);
 }
 
 if (opts.list) {
@@ -216,7 +211,7 @@ if (refNames.every(name => workingRefs.includes(name))) {
 	);
 
 	// A reference that will not build has no numbers at all, so there is nothing left to compare
-	if (failures.length) fail(`could not prepare references:\n  ${failures.join('\n  ')}`);
+	if (failures.length) io.exit(`could not prepare references:\n  ${failures.join('\n  ')}`);
 }
 
 /** One matrix of one reference: the unit of work, and the unit of isolation. */

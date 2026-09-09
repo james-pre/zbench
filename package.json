@@ -59,7 +59,8 @@
 	},
 	"dependencies": {
 		"ioium": "^1.9.0",
-		"utilium": "^3.0.0"
+		"utilium": "^3.0.0",
+		"zod": "^4.5.4"
 	},
 	"engines": {
 		"node": ">=22.18.0"
