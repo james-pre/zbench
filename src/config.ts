@@ -229,10 +229,10 @@ function parseFlags(flags: TestConfig['flags'], pool: Record<string, unknown[]>)
 	return flags;
 }
 
-const ConfigFile = z.union([SuiteConfig, TestConfig.array().transform(tests => ({ tests }))]);
+const ConfigFile = z.preprocess(data => (Array.isArray(data) ? { tests: data } : data), SuiteConfig);
 
-export function loadSuite(file: string): Suite {
-	const cfg: SuiteConfig = io.readJSON(file, ConfigFile);
+/** Turn validated config data into a suite. `file` is what test paths resolve against. */
+function toSuite(cfg: SuiteConfig, file: string): Suite {
 	const dir = dirname(resolve(file));
 
 	const iterations = cfg.iterations ?? 5;
@@ -262,6 +262,20 @@ export function loadSuite(file: string): Suite {
 		build: cfg.build ?? defaultBuild,
 		tests,
 	};
+}
+
+/** Validate already-loaded config data. `file` is what test paths resolve against. */
+export function parseSuite(data: unknown, file: string): Suite {
+	try {
+		return toSuite(ConfigFile.parse(data), file);
+	} catch (e) {
+		// eslint-disable-next-line @typescript-eslint/only-throw-error
+		throw io.errorText(e);
+	}
+}
+
+export function loadSuite(file: string): Suite {
+	return toSuite(io.readJSON(file, ConfigFile), file);
 }
 
 /** Every combination of the given flags, in declaration order. Always at least one (possibly empty) combination. */
