@@ -105,6 +105,11 @@ readable. The timespan is settled once per matrix, so a column has one heading.
 `"unit": "MB"` reports MB/s with no further arithmetic. `scale` sets the multiplier explicitly and
 overrides that.
 
+`compare` narrows what a comparison reports. A test's measurements are all proportional to its
+timings, so every one of them would show the same speedup; marking a single measurement with
+`"compare": true` keeps the comparison table down to the numbers worth reading, and makes that
+measurement the one the factor is computed from.
+
 ## Flags
 
 Flags are alternative code paths rather than points in the matrix: the whole matrix runs once per
@@ -141,10 +146,20 @@ zbench -R v3.2.1 -R main -R HEAD
 ```
 
 Each reference is checked out into a cached worktree under `.zbench/`, built, and run. The first is
-the baseline; every other column shows its value and a speedup factor that is `> 1` when better,
+the baseline; every other reference gets its columns and a speedup factor that is `> 1` when better,
 whichever direction the column improves in. A change is only colored when it is larger than both
 `--threshold` (default 1%) and the two runs' combined noise — so a green number means the change
 outran the variance, and a gray one means it did not.
+
+A matrix is one table, grouped by reference, with a column per measurement and a single factor for
+each reference. The measurements of a matrix are proportional, so the factor is taken from the first
+column rather than repeated across all of them; `"compare": true` on a measurement picks which one
+that is and drops the rest.
+
+Only the matrices worth reading are printed. A matrix where nothing beat the threshold is left out
+unless you pass `--unchanged`, and one that fewer than two references could report — the rest being
+`N/A` — is left out unless you pass `--partial`; either way the count of what was hidden is printed.
+`--no-runs` drops each reference's own tables and reports nothing but the changes.
 
 Use `.` for the working tree as it is, without a checkout or a build.
 
@@ -155,14 +170,13 @@ runnable (default `npm install --no-audit --no-fund && npm run build`), `--rebui
 
 ## Isolation and concurrency
 
-Each matrix runs in a fresh process by default, so one configuration cannot warm up or poison the
-next, and a reference's own build is what gets loaded. `--no-isolate` runs everything in-process for
-debugging or profiling.
+Each matrix runs in a fresh worker thread by default, so one configuration cannot warm up or poison
+the next, and a reference's own build is what gets loaded.
 
-`-J` sets how many matrices are timed at once, defaulting to half the number of hardware threads. Concurrent
-matrices contend for the machine, which inflates absolute numbers and widens `±`; the comparison
-factors hold up because every reference runs under the same contention, but pass `-J 1` when the
-absolute numbers are the point.
+`-J` sets how many matrices are timed at once, defaulting to half the number of hardware threads.
+Concurrent matrices contend for the machine, which inflates absolute numbers and widens `±`;
+the comparison factors hold up because every reference runs under the same contention,
+but pass `-J 1` when the absolute numbers matter more.
 
 A matrix that crashes or outruns `--timeout` (default 300s) is reported as `N/A` rather than
 bringing down the run, so the references that did finish are still compared. This matters when the
@@ -180,12 +194,15 @@ minutes on the commit before it.
   -t, --threshold <pct>   Smallest change worth coloring. [1]
   -T, --timeout <s>       Seconds a matrix may take before it is killed and reported N/A. [300]
   -a, --all               Run every configuration, ignoring cpu/mem requirements.
-  -J, --jobs <n>          Matrices to time at once.
+  -J, --jobs <n>          Matrices to time at once, across every reference.
   -l, --list              List what would run, then exit.
   -j, --json <path>       Write the raw results as JSON.
+      --no-runs           When comparing, skip each reference's own tables and only report changes.
+      --unchanged         Also report matrices where nothing beat the threshold.
+      --partial           Also report matrices where fewer than two references produced numbers.
       --cpu <n>           Override the detected CPU level.
       --mem <n>           Override the detected memory level.
-      --no-isolate        Run in this process instead of one child per matrix.
+      --no-isolate        Run in this process instead of one worker thread per matrix.
       --build <cmd>       Command that makes a reference's worktree runnable.
       --rebuild           Rebuild reference worktrees even when they are up to date.
       --clean             Remove cached reference worktrees, then exit.
