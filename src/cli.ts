@@ -241,7 +241,7 @@ const comparing = prepared.length > 1;
 await io.jobs.runWithData<MatrixJob>(
 	{
 		concurrency: jobs,
-		jobStartText: dim('running'),
+		jobStartText: 'running',
 		name: job =>
 			[job.test.name, flagLabel(job.flags)].filter(Boolean).join(' ')
 			+ (comparing ? dim(' @ ' + job.ref.name) : ''),
@@ -256,7 +256,7 @@ await io.jobs.runWithData<MatrixJob>(
 					timeout
 				);
 
-				return { status: 'succeeded', text: dim(duration(performance.now() - started)) };
+				return { status: 'succeeded', text: styleText('blue', duration(performance.now() - started)) };
 			} catch (e: any) {
 				const error = String(e?.message ?? e);
 
