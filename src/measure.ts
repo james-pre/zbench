@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 import { flagLabel, type Metric, type Test } from './config.js';
-import type { CaseResult } from './runner.js';
+import type { CaseResult } from './types.js';
 import { stats, type Stats } from './stats.js';
 import { duration, inferCostSpan, inferThroughputSpan, sig, timespans, type Timespan } from './units.js';
 

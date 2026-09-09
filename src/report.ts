@@ -4,7 +4,7 @@ import { styleText } from 'node:util';
 import type { Comparison, ComparisonRow, RefResults } from './compare.js';
 import type { Suite, Test } from './config.js';
 import { columns, matrices, timing, type Column, type Matrix } from './measure.js';
-import type { CaseResult } from './runner.js';
+import type { CaseResult } from './types.js';
 import { duration, sig } from './units.js';
 
 const dim = (text: string) => styleText('gray', text);

@@ -170,13 +170,18 @@ runnable (default `npm install --no-audit --no-fund && npm run build`), `--rebui
 
 ## Isolation and concurrency
 
-Each matrix runs in a fresh worker thread by default, so one configuration cannot warm up or poison
-the next, and a reference's own build is what gets loaded.
+Every matrix runs in a fresh worker thread, so one configuration cannot warm up or poison the next,
+and a reference's own build is what gets loaded.
 
 `-J` sets how many matrices are timed at once, defaulting to half the number of hardware threads.
 Concurrent matrices contend for the machine, which inflates absolute numbers and widens `±`;
 the comparison factors hold up because every reference runs under the same contention,
 but pass `-J 1` when the absolute numbers matter more.
+
+References do not overlap: one is finished before the next one starts, so a reference's matrices all
+meet the same contention rather than some of them sharing the machine with the reference they are
+being compared against. `--overlap` lifts that and lets `-J` fill from every reference at once,
+which finishes sooner at the cost of a noisier comparison.
 
 A matrix that crashes or outruns `--timeout` (default 300s) is reported as `N/A` rather than
 bringing down the run, so the references that did finish are still compared. This matters when the
@@ -194,15 +199,15 @@ minutes on the commit before it.
   -t, --threshold <pct>   Smallest change worth coloring. [1]
   -T, --timeout <s>       Seconds a matrix may take before it is killed and reported N/A. [300]
   -a, --all               Run every configuration, ignoring cpu/mem requirements.
-  -J, --jobs <n>          Matrices to time at once, across every reference.
+  -J, --jobs <n>          Matrices to time at once.
   -l, --list              List what would run, then exit.
   -j, --json <path>       Write the raw results as JSON.
+      --overlap           Let matrices from different references run at the same time.
       --no-runs           When comparing, skip each reference's own tables and only report changes.
       --unchanged         Also report matrices where nothing beat the threshold.
       --partial           Also report matrices where fewer than two references produced numbers.
       --cpu <n>           Override the detected CPU level.
       --mem <n>           Override the detected memory level.
-      --no-isolate        Run in this process instead of one worker thread per matrix.
       --build <cmd>       Command that makes a reference's worktree runnable.
       --rebuild           Rebuild reference worktrees even when they are up to date.
       --clean             Remove cached reference worktrees, then exit.

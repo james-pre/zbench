@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
-import type { CaseResult } from './runner.js';
+import type { CaseResult } from './types.js';
+import type { Test } from './config.js';
 
 /** Everything a worker needs to run exactly one matrix. */
 export interface WorkerConfig {
@@ -16,6 +17,7 @@ export interface WorkerConfig {
 	cpu?: number;
 	mem?: number;
 	all?: boolean;
+	onCase?(test: Test, flags: Record<string, unknown>, configuration: string, index: number, total: number): void;
 }
 
 /** Resolved next to this module, so it works from `dist` and from the sources alike. */

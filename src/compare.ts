@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 import { columns, matrices, timing, type Column, type Matrix } from './measure.js';
-import type { CaseResult } from './runner.js';
+import type { CaseResult } from './types.js';
 import { combinedNoise } from './stats.js';
 import type { Suite, Test } from './config.js';
 

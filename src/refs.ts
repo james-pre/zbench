@@ -29,11 +29,8 @@ export interface RefOptions {
 	root: string;
 	/** Build even when the worktree is already at the right commit */
 	rebuild?: boolean;
-	/**
-	 * Wraps each step of preparation, so a caller can report it starting and finishing.
-	 * Steps run one at a time, so a reporter can treat each as a single operation.
-	 */
-	onStep?<T>(message: string, run: () => Promise<T>): Promise<T>;
+	/** Called as preparation moves from one step to the next, so a caller can report where it is. */
+	onStep?(message: string): void;
 }
 
 async function git(repo: string, ...args: string[]): Promise<string> {
@@ -72,66 +69,58 @@ async function copyTests(repo: string, dir: string, root: string): Promise<void>
 }
 
 /**
- * Check out every reference and make it runnable.
- *
- * One reference is prepared at a time: `git worktree add` takes a repository-wide lock anyway, and
- * a single step at a time is what lets the caller report one as it happens. Nothing here is timed,
- * so what this costs is wall clock rather than any measurement.
+ * `git worktree add` takes a repository-wide lock, so two references being prepared at once would
+ * race over it. Checkouts queue up behind this; building, which is where nearly all of the time
+ * goes, does not. Nothing here is timed, so the overlap costs the measurements nothing.
  */
-export async function prepareRefs(names: string[], options: RefOptions): Promise<Ref[]> {
-	const repo = await repoRoot();
-	const refs: Ref[] = [];
+let checkouts: Promise<unknown> = Promise.resolve();
 
-	async function step<T>(message: string, run: () => Promise<T>): Promise<T> {
-		return options.onStep ? await options.onStep(message, run) : await run();
-	}
-
-	for (const name of names) {
-		if (workingRefs.includes(name)) {
-			// The working tree runs where it is, so there is nothing to check out, copy, or build
-			refs.push({ name, dir: repo, sha: null });
-			continue;
-		}
-
-		const sha = await git(repo, 'rev-parse', name + '^{commit}');
-		const dir = join(options.cache, slug(name));
-		const stamp = join(dir, '.zbench-ref');
-
-		const current = existsSync(stamp) ? (await readFile(stamp, 'utf-8')).trim() : null;
-		const build = current != sha || !!options.rebuild;
-
-		if (build) {
-			await step(`Checking out ${name} (${sha.slice(0, 8)})`, async () => {
-				if (existsSync(dir)) {
-					await git(repo, 'worktree', 'remove', '--force', dir).catch(() => {});
-					await rm(dir, { recursive: true, force: true });
-				}
-
-				await mkdir(options.cache, { recursive: true });
-				await git(repo, 'worktree', 'add', '--detach', dir, sha);
-			});
-		}
-
-		// Even a cached worktree gets today's tests, since the ones it was built with are stale
-		await copyTests(repo, dir, options.root);
-
-		if (build) {
-			await step(`Building ${name}`, async () => {
-				await execFile('sh', ['-c', options.build], { cwd: dir, maxBuffer: 1 << 26 });
-				await writeFile(join(dir, '.zbench-ref'), sha + '\n');
-			});
-		}
-
-		refs.push({ name, dir, sha });
-	}
-
-	return refs;
+function serially<T>(run: () => Promise<T>): Promise<T> {
+	// Settled either way, so one reference failing to check out does not wedge the queue
+	const result = checkouts.then(run, run);
+	checkouts = result.catch(() => {});
+	return result;
 }
 
 /** Check out one reference into a reusable worktree, build it, and stage the tests inside it. */
 export async function prepareRef(name: string, options: RefOptions): Promise<Ref> {
-	const [ref] = await prepareRefs([name], options);
-	return ref;
+	const repo = await repoRoot();
+
+	// The working tree runs where it is, so there is nothing to check out, copy, or build
+	if (workingRefs.includes(name)) return { name, dir: repo, sha: null };
+
+	const sha = await git(repo, 'rev-parse', name + '^{commit}');
+	const dir = join(options.cache, slug(name));
+	const stamp = join(dir, '.zbench-ref');
+
+	const current = existsSync(stamp) ? (await readFile(stamp, 'utf-8')).trim() : null;
+	const build = current != sha || !!options.rebuild;
+
+	if (build) {
+		await serially(async () => {
+			options.onStep?.(`checking out ${sha.slice(0, 8)}`);
+
+			if (existsSync(dir)) {
+				await git(repo, 'worktree', 'remove', '--force', dir).catch(() => {});
+				await rm(dir, { recursive: true, force: true });
+			}
+
+			await mkdir(options.cache, { recursive: true });
+			await git(repo, 'worktree', 'add', '--detach', dir, sha);
+		});
+	}
+
+	// Even a cached worktree gets today's tests, since the ones it was built with are a release behind
+	options.onStep?.('staging tests');
+	await copyTests(repo, dir, options.root);
+
+	if (build) {
+		options.onStep?.('building');
+		await execFile('sh', ['-c', options.build], { cwd: dir, maxBuffer: 1 << 26 });
+		await writeFile(join(dir, '.zbench-ref'), sha + '\n');
+	}
+
+	return { name, dir, sha };
 }
 
 /** Remove every cached worktree. */

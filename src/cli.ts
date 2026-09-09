@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: LGPL-3.0-or-later
-import * as io from 'ioium/node';
 import type { JobResult } from 'ioium/jobs';
+import * as io from 'ioium/node';
 import { writeFile } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -10,9 +10,9 @@ import { resolveCapabilities } from './capabilities.js';
 import { compare, type RefResults } from './compare.js';
 import { findConfig, flagCombinations, flagLabel, loadSuite, type Suite, type Test } from './config.js';
 import { runIsolated } from './isolate.js';
-import { cleanRefs, prepareRefs, repoRoot, workingRefs, type Ref } from './refs.js';
+import { cleanRefs, prepareRef, repoRoot, workingRefs, type Ref } from './refs.js';
 import { reportComparison, reportEnvironment, reportList, reportRun } from './report.js';
-import { runTest, type CaseResult } from './runner.js';
+import type { CaseResult } from './types.js';
 import { duration } from './units.js';
 
 const usage = `Usage: zbench [options] [filter...]
@@ -31,18 +31,19 @@ Options:
                           0 waits forever. A reference with a pathological regression can
                           otherwise hold the whole comparison open.
   -a, --all               Run every configuration, ignoring cpu/mem requirements.
-  -J, --jobs <n>          Matrices to time at once, across every reference.
-                          [one per two hardware threads, 1 with --no-isolate]
+  -J, --jobs <n>          Matrices to time at once. [one per two hardware threads]
                           Concurrent matrices contend for the machine, which widens the ± column;
                           pass -J 1 for the quietest numbers.
   -l, --list              List what would run, then exit.
   -j, --json <path>       Write the raw results as JSON.
+      --overlap           Let matrices from different references run at the same time. By default
+                          a reference is finished before the next one starts, so every matrix of a
+                          reference meets the same contention.
       --no-runs           When comparing, skip each reference's own tables and only report changes.
       --unchanged         Also report matrices where nothing beat the threshold.
       --partial           Also report matrices where fewer than two references produced numbers.
       --cpu <n>           Override the detected CPU level.
       --mem <n>           Override the detected memory level.
-      --no-isolate        Run in this process instead of one worker thread per matrix.
       --build <cmd>       Command that makes a reference's worktree runnable.
       --rebuild           Rebuild reference worktrees even when they are up to date.
       --clean             Remove cached reference worktrees, then exit.
@@ -63,12 +64,12 @@ const { values: opts, positionals: filters } = parseArgs({
 		jobs: { short: 'J', type: 'string' },
 		list: { short: 'l', type: 'boolean' },
 		json: { short: 'j', type: 'string' },
+		overlap: { type: 'boolean' },
 		runs: { type: 'boolean', default: true },
 		unchanged: { type: 'boolean' },
 		partial: { type: 'boolean' },
 		cpu: { type: 'string' },
 		mem: { type: 'string' },
-		isolate: { type: 'boolean', default: true },
 		build: { type: 'string' },
 		rebuild: { type: 'boolean' },
 		clean: { type: 'boolean' },
@@ -96,23 +97,7 @@ if (opts.quiet) {
 	io.jobs.useClear(ignore);
 }
 
-/** `io.start`/`io.done`, minus the line `--quiet` does not want. */
-const status = {
-	active: false,
-	start(message: string) {
-		if (opts.quiet) return;
-		io.start(message);
-		this.active = true;
-	},
-	done(print: boolean = true) {
-		if (!this.active) return;
-		io.done(!print);
-		this.active = false;
-	},
-};
-
 function fail(message: string): never {
-	status.done(false);
 	io.error(message);
 	process.exit(1);
 }
@@ -182,17 +167,7 @@ const warmup = number(opts.warmup, 'warmup');
 
 const refNames = opts.ref.length ? opts.ref : ['.'];
 
-// Concurrent work in one thread would interleave the tests' own awaits into each other's timings
-const jobs = Math.max(
-	1,
-	number(opts.jobs, 'jobs') ?? (opts.isolate ? Math.round((navigator.hardwareConcurrency || 0) / 2) || 1 : 1)
-);
-if (jobs > 1 && !opts.isolate) fail('--jobs above 1 needs isolation, so it cannot be used with --no-isolate');
-
-// Without isolation the working tree's modules are what get imported, whatever reference is asked
-// for, which would quietly report every reference as identical
-if (!opts.isolate && refNames.some(name => !workingRefs.includes(name)))
-	fail('--no-isolate runs the working tree, so it cannot benchmark a git reference');
+const jobs = Math.max(1, number(opts.jobs, 'jobs') ?? (Math.round((navigator.hardwareConcurrency || 0) / 2) || 1));
 
 /** Every (test, flag combination) pair that will run, i.e. one table each. */
 function* planned(suite: Suite): Generator<[Test, Record<string, unknown>]> {
@@ -211,22 +186,37 @@ if (!opts.quiet) reportEnvironment(cpu, mem, iterations ?? 5, warmup ?? 1, jobs)
 
 const repo = await repoRoot().catch(() => process.cwd());
 
-let prepared: Ref[];
-try {
-	prepared = await prepareRefs(refNames, {
-		cache,
-		build: opts.build ?? suite.build,
-		root: suite.root,
-		rebuild: opts.rebuild,
-		async onStep(message, run) {
-			status.start(message);
-			const result = await run();
-			status.done();
-			return result;
+const refOptions = { cache, build: opts.build ?? suite.build, root: suite.root, rebuild: opts.rebuild };
+const prepared = new Array<Ref>(refNames.length);
+
+// The working tree is used where it is, so the usual case has nothing to report and no job to run
+if (refNames.every(name => workingRefs.includes(name))) {
+	prepared.splice(0, refNames.length, ...(await Promise.all(refNames.map(name => prepareRef(name, refOptions)))));
+} else {
+	const failures: string[] = [];
+
+	await io.jobs.runWithData(
+		{
+			concurrency: refNames.length,
+			jobStartText: dim('preparing'),
+			name: ({ name }) => name,
+			async run({ name, index }, progress): Promise<JobResult> {
+				try {
+					prepared[index] = await prepareRef(name, { ...refOptions, onStep: m => progress(dim(m)) });
+					return { status: 'succeeded', text: dim('ready') };
+				} catch (e: any) {
+					const text = String(e?.stderr || e?.message || e).trim();
+					const reason = text.split('\n').filter(Boolean).at(-1) ?? 'failed';
+					failures.push(`${name}: ${reason}`);
+					return { status: 'failed', text: reason };
+				}
+			},
 		},
-	});
-} catch (e: any) {
-	fail(`could not prepare references: ${e.stderr || e.message}`);
+		refNames.map((name, index) => ({ name, index }))
+	);
+
+	// A reference that will not build has no numbers at all, so there is nothing left to compare
+	if (failures.length) fail(`could not prepare references:\n  ${failures.join('\n  ')}`);
 }
 
 /** One matrix of one reference: the unit of work, and the unit of isolation. */
@@ -255,33 +245,16 @@ await io.jobs.runWithData<MatrixJob>(
 		name: job =>
 			[job.test.name, flagLabel(job.flags)].filter(Boolean).join(' ')
 			+ (comparing ? dim(' @ ' + job.ref.name) : ''),
+		group: opts.overlap ? undefined : job => job.ref,
 		async run(job): Promise<JobResult> {
 			const config = job.ref.sha ? join(job.ref.dir, relative(repo, suite.file)) : suite.file;
 			const started = performance.now();
 
 			try {
-				results[job.index] = opts.isolate
-					? await runIsolated(
-							{
-								config,
-								test: job.test.id,
-								flags: job.flags,
-								iterations,
-								warmup,
-								cpu,
-								mem,
-								all: opts.all,
-							},
-							timeout
-						)
-					: await runTest(job.test, {
-							iterations,
-							warmup,
-							cpu,
-							mem,
-							all: opts.all,
-							flags: Object.fromEntries(Object.entries(job.flags).map(([k, v]) => [k, [v]])),
-						});
+				results[job.index] = await runIsolated(
+					{ config, test: job.test.id, flags: job.flags, iterations, warmup, cpu, mem, all: opts.all },
+					timeout
+				);
 
 				return { status: 'succeeded', text: dim(duration(performance.now() - started)) };
 			} catch (e: any) {

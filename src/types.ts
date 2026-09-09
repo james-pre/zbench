@@ -30,3 +30,22 @@ export interface TestModule<C = any, S = any> {
 	/** Run once per configuration, after every iteration. */
 	teardown?(config: C, state: S): unknown;
 }
+
+/** The measurements taken for one test at one point in its matrix. */
+export interface CaseResult {
+	/** The test's id, i.e. its path as written in the config */
+	test: string;
+	flags: Record<string, unknown>;
+	configuration: string;
+	value: Record<string, number>;
+	/** Milliseconds `setup` took */
+	setup: number;
+	/** Milliseconds each timed iteration took */
+	samples: number[];
+	/** Raw amounts summed over every timed iteration, keyed by quantity */
+	amounts: Amounts;
+	/** Present when the configuration was not run */
+	skipped?: string;
+	/** Present when the test threw */
+	error?: string;
+}
