@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { suite, test } from 'node:test';
-import { flagCombinations, parseSuite } from 'zbench/config';
+import { flagCombinations, parseSuite } from 'zbench-js/config';
 
 const file = join(import.meta.dirname, 'config.json');
 

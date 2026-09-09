@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 import assert from 'node:assert/strict';
 import { suite, test } from 'node:test';
-import { delta, type Cell } from 'zbench/compare';
-import { combinedNoise, stats } from 'zbench/stats';
+import { delta, type Cell } from 'zbench-js/compare';
+import { combinedNoise, stats } from 'zbench-js/stats';
 
 const cell = (value: number, noise = 0): Cell => ({ value, noise, missing: false });
 

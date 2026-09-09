@@ -125,6 +125,8 @@ export interface Column {
 	total?(cases: CaseResult[]): number | null;
 	/** Aggregate columns are reported once per matrix instead of once per row */
 	aggregate: boolean;
+	/** Whether the metric behind this column asked to be the one comparisons report. Never set on the built-ins. */
+	compare: boolean;
 }
 
 /**
@@ -139,6 +141,7 @@ export function columns(matrix: Matrix): Column[] {
 			format: duration,
 			value: result => timing(result).mean || null,
 			aggregate: false,
+			compare: false,
 		},
 		{
 			label: 'ops/s',
@@ -146,6 +149,7 @@ export function columns(matrix: Matrix): Column[] {
 			format: sig,
 			value: opsPerSecond,
 			aggregate: false,
+			compare: false,
 		},
 	];
 
@@ -157,6 +161,7 @@ export function columns(matrix: Matrix): Column[] {
 			value: result => caseValue(metric, result),
 			total: cases => aggregateValue(metric, { ...matrix, cases }),
 			aggregate: metric.aggregate,
+			compare: metric.compare,
 		});
 	}
 

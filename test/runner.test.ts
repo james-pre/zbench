@@ -2,9 +2,9 @@
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { suite, test } from 'node:test';
-import { parseSuite, type SuiteSpec } from 'zbench/config';
-import { aggregateValue, caseValue, columns, matrices, resolveMetrics } from 'zbench/measure';
-import { runTest } from 'zbench/runner';
+import { parseSuite, type SuiteSpec } from 'zbench-js/config';
+import { aggregateValue, caseValue, columns, matrices, resolveMetrics } from 'zbench-js/measure';
+import { runTest } from 'zbench-js/runner';
 import { counts } from './fixtures/simple.ts';
 
 const file = join(import.meta.dirname, 'config.json');

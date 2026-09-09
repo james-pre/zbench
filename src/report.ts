@@ -3,7 +3,7 @@ import * as io from 'ioium/node';
 import { styleText } from 'node:util';
 import type { Comparison, ComparisonRow, RefResults } from './compare.js';
 import type { Suite, Test } from './config.js';
-import { columns, matrices, timing, type Matrix } from './measure.js';
+import { columns, matrices, timing, type Column, type Matrix } from './measure.js';
 import type { CaseResult } from './runner.js';
 import { duration, sig } from './units.js';
 
@@ -113,50 +113,88 @@ function factorText(row: ComparisonRow, index: number): string {
 	return styleText(better ? 'green' : 'red', text);
 }
 
-/** Print the delta tables that follow each state's own tables. */
-export function reportComparison(comparisons: Comparison[], refs: RefResults[]): void {
-	const names = refs.map(ref => ref.ref);
-	let heading: string | null = null;
+/**
+ * One table holding every column of a matrix, grouped by state.
+ * Each state gets a value per column and a single factor, since the columns of a matrix are
+ * proportional and would otherwise repeat the same speedup.
+ */
+function comparisonTable(names: string[], cols: Column[], rows: ComparisonRow[]): void {
+	if (!cols.length || !rows.length) return;
 
-	for (const comparison of comparisons) {
-		const rows = comparison.aggregate ? [comparison.aggregate] : comparison.rows;
-		if (!rows.length) continue;
-
-		const label = comparison.test.name + (comparison.label ? dim('  ' + comparison.label) : '');
-		if (label != heading) {
-			console.log();
-			console.log(bold((heading = label)));
-		}
-
-		console.log('  ' + dim(comparison.column.label) + (comparison.aggregate ? dim(' (aggregate)') : ''));
-
-		io.table<ComparisonRow>(
-			[
-				{ name: indent + 'configuration', text: row => indent + row.configuration, grow: 0 },
-				{
-					name: names[0],
-					text: row =>
-						row.cells[0].value === null ? dim('N/A') : comparison.column.format(row.cells[0].value),
+	io.table<ComparisonRow>(
+		[
+			{ name: indent + 'configuration', text: row => indent + row.configuration, grow: 0 },
+			...names.flatMap((name, r) => [
+				{ name, text: () => '', grow: 0 },
+				...cols.map((column, c) => ({
+					name: column.label,
+					text: (row: ComparisonRow) => {
+						const { value } = row.cells[r][c];
+						return value === null ? dim('N/A') : column.format(value);
+					},
 					padStart: true,
 					grow: 0,
-				},
-				...names.slice(1).flatMap((name, i) => [
-					{
-						name,
-						text: (row: ComparisonRow) => {
-							const cell = row.cells[i + 1];
-							return cell.value === null ? dim('N/A') : comparison.column.format(cell.value);
-						},
-						padStart: true,
-						grow: 0,
-					},
-					{ name: '', text: (row: ComparisonRow) => factorText(row, i + 1), padStart: true, grow: 0 },
-				]),
-			],
-			{ formatHead: dim },
-			rows
-		);
+				})),
+				...(r == 0
+					? []
+					: [{ name: '', text: (row: ComparisonRow) => factorText(row, r), padStart: true, grow: 0 }]),
+			]),
+		],
+		{ formatHead: dim },
+		rows
+	);
+}
+
+export interface ComparisonOptions {
+	/** Also report matrices where nothing beat the threshold */
+	unchanged?: boolean;
+	/** Also report matrices where fewer than two states produced numbers */
+	partial?: boolean;
+}
+
+/** Print the delta tables that follow each state's own tables. */
+export function reportComparison(comparisons: Comparison[], refs: RefResults[], options: ComparisonOptions = {}): void {
+	const names = refs.map(ref => ref.ref);
+	let heading: Test | null = null;
+	let unchanged = 0;
+	let partial = 0;
+	let shown = 0;
+
+	for (const comparison of comparisons) {
+		if (comparison.reported < 2) {
+			if (!options.partial) {
+				partial++;
+				continue;
+			}
+		} else if (!comparison.changed && !options.unchanged) {
+			unchanged++;
+			continue;
+		}
+		if (!comparison.rows.length && !comparison.aggregate) continue;
+
+		console.log();
+		if (comparison.test != heading) console.log(bold((heading = comparison.test).name));
+
+		if (comparison.label) console.log('  ' + dim(comparison.label));
+
+		comparisonTable(names, comparison.columns, comparison.rows);
+
+		if (comparison.aggregate) {
+			if (comparison.columns.length) console.log();
+			comparisonTable(names, comparison.aggregateColumns, [comparison.aggregate]);
+		}
+
+		shown++;
 	}
+
+	const hidden = [
+		unchanged && `${unchanged} unchanged (--unchanged)`,
+		partial && `${partial} reported by one reference (--partial)`,
+	].filter(Boolean);
+
+	if (!hidden.length) return;
+	if (!shown) console.log();
+	console.log(indent + dim(`${hidden.join(', ')}`));
 }
 
 /** A one-line note about what the numbers were produced under. */

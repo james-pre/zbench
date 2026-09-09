@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 import assert from 'node:assert/strict';
 import { suite, test } from 'node:test';
-import { duration, inferCostSpan, inferThroughputSpan, sig, unitScale } from 'zbench/units';
+import { duration, inferCostSpan, inferThroughputSpan, sig, unitScale } from 'zbench-js/units';
 
 suite('units', () => {
 	test('significant figures drop trailing zeroes', () => {

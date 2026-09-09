@@ -1,17 +1,19 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: LGPL-3.0-or-later
 import * as io from 'ioium/node';
+import type { JobResult } from 'ioium/jobs';
 import { writeFile } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { parseArgs, styleText } from 'node:util';
 import { resolveCapabilities } from './capabilities.js';
 import { compare, type RefResults } from './compare.js';
 import { findConfig, flagCombinations, flagLabel, loadSuite, type Suite, type Test } from './config.js';
-import { runIsolated, runWorker } from './isolate.js';
-import { cleanRefs, prepareRefs, repoRoot, type Ref } from './refs.js';
+import { runIsolated } from './isolate.js';
+import { cleanRefs, prepareRefs, repoRoot, workingRefs, type Ref } from './refs.js';
 import { reportComparison, reportEnvironment, reportList, reportRun } from './report.js';
-import { mapPool } from './pool.js';
 import { runTest, type CaseResult } from './runner.js';
+import { duration } from './units.js';
 
 const usage = `Usage: zbench [options] [filter...]
 
@@ -29,14 +31,18 @@ Options:
                           0 waits forever. A reference with a pathological regression can
                           otherwise hold the whole comparison open.
   -a, --all               Run every configuration, ignoring cpu/mem requirements.
-  -J, --jobs <n>          Matrices to time at once. [one per hardware thread, 1 with --no-isolate]
+  -J, --jobs <n>          Matrices to time at once, across every reference.
+                          [one per two hardware threads, 1 with --no-isolate]
                           Concurrent matrices contend for the machine, which widens the ± column;
                           pass -J 1 for the quietest numbers.
   -l, --list              List what would run, then exit.
   -j, --json <path>       Write the raw results as JSON.
+      --no-runs           When comparing, skip each reference's own tables and only report changes.
+      --unchanged         Also report matrices where nothing beat the threshold.
+      --partial           Also report matrices where fewer than two references produced numbers.
       --cpu <n>           Override the detected CPU level.
       --mem <n>           Override the detected memory level.
-      --no-isolate        Run in this process instead of one child per matrix.
+      --no-isolate        Run in this process instead of one worker thread per matrix.
       --build <cmd>       Command that makes a reference's worktree runnable.
       --rebuild           Rebuild reference worktrees even when they are up to date.
       --clean             Remove cached reference worktrees, then exit.
@@ -57,6 +63,9 @@ const { values: opts, positionals: filters } = parseArgs({
 		jobs: { short: 'J', type: 'string' },
 		list: { short: 'l', type: 'boolean' },
 		json: { short: 'j', type: 'string' },
+		runs: { type: 'boolean', default: true },
+		unchanged: { type: 'boolean' },
+		partial: { type: 'boolean' },
 		cpu: { type: 'string' },
 		mem: { type: 'string' },
 		isolate: { type: 'boolean', default: true },
@@ -65,9 +74,9 @@ const { values: opts, positionals: filters } = parseArgs({
 		clean: { type: 'boolean' },
 		quiet: { short: 'q', type: 'boolean' },
 		help: { short: 'h', type: 'boolean' },
-		worker: { type: 'string' },
 	},
 	allowPositionals: true,
+	allowNegative: true,
 });
 
 if (opts.help) {
@@ -75,12 +84,35 @@ if (opts.help) {
 	process.exit(0);
 }
 
-if (opts.worker) {
-	await runWorker(opts.worker);
-	process.exit(0);
+const dim = (text: string) => styleText('gray', text);
+
+const ignore = () => {};
+
+// Results go to the console directly, so silencing ioium leaves them in place while the job lines,
+// the progress line and the incidental notices go away
+if (opts.quiet) {
+	io.useOutput({ debug: ignore, log: ignore, info: ignore, warn: console.warn, error: console.error });
+	io.jobs.useDraw(ignore);
+	io.jobs.useClear(ignore);
 }
 
+/** `io.start`/`io.done`, minus the line `--quiet` does not want. */
+const status = {
+	active: false,
+	start(message: string) {
+		if (opts.quiet) return;
+		io.start(message);
+		this.active = true;
+	},
+	done(print: boolean = true) {
+		if (!this.active) return;
+		io.done(!print);
+		this.active = false;
+	},
+};
+
 function fail(message: string): never {
+	status.done(false);
 	io.error(message);
 	process.exit(1);
 }
@@ -148,32 +180,19 @@ const timeout = number(opts.timeout, 'timeout') ?? 300;
 const iterations = number(opts.iterations, 'iterations');
 const warmup = number(opts.warmup, 'warmup');
 
-const cli = resolve(import.meta.dirname, 'cli.js');
 const refNames = opts.ref.length ? opts.ref : ['.'];
 
-// Concurrent work in one process would interleave the tests' own awaits into each other's timings
+// Concurrent work in one thread would interleave the tests' own awaits into each other's timings
 const jobs = Math.max(
 	1,
 	number(opts.jobs, 'jobs') ?? (opts.isolate ? Math.round((navigator.hardwareConcurrency || 0) / 2) || 1 : 1)
 );
-if (jobs > 1 && !opts.isolate) fail('--jobs above 1 needs process isolation, so it cannot be used with --no-isolate');
+if (jobs > 1 && !opts.isolate) fail('--jobs above 1 needs isolation, so it cannot be used with --no-isolate');
 
-/** Overwrite the progress line, if there is one to overwrite. */
-const progress = {
-	active: false,
-	show(message: string) {
-		if (opts.quiet || !process.stdout.isTTY) return;
-		this.clear();
-		process.stdout.write(styleText('gray', message));
-		this.active = true;
-	},
-	clear() {
-		if (!this.active) return;
-		process.stdout.clearLine(0);
-		process.stdout.cursorTo(0);
-		this.active = false;
-	},
-};
+// Without isolation the working tree's modules are what get imported, whatever reference is asked
+// for, which would quietly report every reference as identical
+if (!opts.isolate && refNames.some(name => !workingRefs.includes(name)))
+	fail('--no-isolate runs the working tree, so it cannot benchmark a git reference');
 
 /** Every (test, flag combination) pair that will run, i.e. one table each. */
 function* planned(suite: Suite): Generator<[Test, Record<string, unknown>]> {
@@ -188,53 +207,6 @@ function* planned(suite: Suite): Generator<[Test, Record<string, unknown>]> {
 	}
 }
 
-async function runRef(ref: Ref, repo: string): Promise<CaseResult[]> {
-	const config = ref.sha ? join(ref.dir, relative(repo, suite.file)) : suite.file;
-	const matrices = [...planned(suite)];
-	let done = 0;
-
-	const results = await mapPool(matrices, jobs, async ([test, flags]) => {
-		const label = [test.name, flagLabel(flags)].filter(Boolean).join(' ');
-		progress.show(`[${done + 1}/${matrices.length}] ${label}${ref.sha ? ` @ ${ref.name}` : ''}...`);
-
-		try {
-			return opts.isolate
-				? await runIsolated(
-						{ config, test: test.id, flags, iterations, warmup, cpu, mem, all: opts.all },
-						ref.dir,
-						cli,
-						timeout
-					)
-				: await runTest(test, {
-						iterations,
-						warmup,
-						cpu,
-						mem,
-						all: opts.all,
-						flags: Object.fromEntries(Object.entries(flags).map(([k, v]) => [k, [v]])),
-					});
-		} catch (e: any) {
-			// A matrix that cannot run is one reference's problem, not the whole comparison's:
-			// report it as N/A and let the references that did run still be compared
-			return test.configurations.map((configuration): CaseResult => ({
-				test: test.id,
-				flags,
-				configuration: configuration.name,
-				value: configuration.value,
-				setup: 0,
-				samples: [],
-				amounts: {},
-				error: String(e?.message ?? e),
-			}));
-		} finally {
-			done++;
-		}
-	});
-
-	progress.clear();
-	return results.flat();
-}
-
 if (!opts.quiet) reportEnvironment(cpu, mem, iterations ?? 5, warmup ?? 1, jobs);
 
 const repo = await repoRoot().catch(() => process.cwd());
@@ -246,33 +218,120 @@ try {
 		build: opts.build ?? suite.build,
 		root: suite.root,
 		rebuild: opts.rebuild,
-		onStep: message => progress.show(message + '...'),
+		async onStep(message, run) {
+			status.start(message);
+			const result = await run();
+			status.done();
+			return result;
+		},
 	});
 } catch (e: any) {
-	progress.clear();
 	fail(`could not prepare references: ${e.stderr || e.message}`);
 }
-progress.clear();
 
-const refs: RefResults[] = [];
-
-for (const ref of prepared) {
-	if (prepared.length > 1 && !opts.quiet) {
-		console.log();
-		console.log(
-			styleText(['bold', 'underline'], ref.name) + (ref.sha ? styleText('gray', '  ' + ref.sha.slice(0, 8)) : '')
-		);
-	}
-
-	const cases = await runRef(ref, repo);
-	reportRun(suite, cases);
-	refs.push({ ref: ref.name, cases });
+/** One matrix of one reference: the unit of work, and the unit of isolation. */
+interface MatrixJob {
+	/** Position in `results`, so a matrix stays where it was planned however late it finishes */
+	index: number;
+	ref: Ref;
+	test: Test;
+	flags: Record<string, unknown>;
 }
 
-if (refs.length > 1) {
+const plan = [...planned(suite)];
+const queue: MatrixJob[] = [];
+
+// Every reference's matrices go into one queue, so a reference that finishes early does not leave
+// the machine idle while a slow one is still running
+for (const ref of prepared) for (const [test, flags] of plan) queue.push({ index: queue.length, ref, test, flags });
+
+const results = new Array<CaseResult[]>(queue.length);
+const comparing = prepared.length > 1;
+
+await io.jobs.runWithData<MatrixJob>(
+	{
+		concurrency: jobs,
+		jobStartText: dim('running'),
+		name: job =>
+			[job.test.name, flagLabel(job.flags)].filter(Boolean).join(' ')
+			+ (comparing ? dim(' @ ' + job.ref.name) : ''),
+		async run(job): Promise<JobResult> {
+			const config = job.ref.sha ? join(job.ref.dir, relative(repo, suite.file)) : suite.file;
+			const started = performance.now();
+
+			try {
+				results[job.index] = opts.isolate
+					? await runIsolated(
+							{
+								config,
+								test: job.test.id,
+								flags: job.flags,
+								iterations,
+								warmup,
+								cpu,
+								mem,
+								all: opts.all,
+							},
+							timeout
+						)
+					: await runTest(job.test, {
+							iterations,
+							warmup,
+							cpu,
+							mem,
+							all: opts.all,
+							flags: Object.fromEntries(Object.entries(job.flags).map(([k, v]) => [k, [v]])),
+						});
+
+				return { status: 'succeeded', text: dim(duration(performance.now() - started)) };
+			} catch (e: any) {
+				const error = String(e?.message ?? e);
+
+				// A matrix that cannot run is one reference's problem, not the whole comparison's:
+				// report it as N/A and let the references that did run still be compared
+				results[job.index] = job.test.configurations.map((configuration): CaseResult => ({
+					test: job.test.id,
+					flags: job.flags,
+					configuration: configuration.name,
+					value: configuration.value,
+					setup: 0,
+					samples: [],
+					amounts: {},
+					error,
+				}));
+
+				return { status: 'failed', text: error.split('\n')[0] };
+			}
+		},
+	},
+	queue
+);
+
+// The queue is reference-major, so each reference owns one contiguous run of the results
+const refs: RefResults[] = prepared.map((ref, i) => ({
+	ref: ref.name,
+	cases: results.slice(i * plan.length, (i + 1) * plan.length).flat(),
+}));
+
+// With one reference there is no comparison to fall back on, so its own tables are the whole report
+if (opts.runs || !comparing) {
+	for (const [i, ref] of refs.entries()) {
+		if (comparing && !opts.quiet) {
+			const { sha } = prepared[i];
+			console.log();
+			console.log(styleText(['bold', 'underline'], ref.ref) + (sha ? dim('  ' + sha.slice(0, 8)) : ''));
+		}
+		reportRun(suite, ref.cases);
+	}
+}
+
+if (comparing) {
 	console.log();
 	console.log(styleText(['bold', 'underline'], `Change vs ${refs[0].ref}`));
-	reportComparison(compare(suite, refs, threshold), refs);
+	reportComparison(compare(suite, refs, threshold), refs, {
+		unchanged: opts.unchanged,
+		partial: opts.partial,
+	});
 }
 
 if (opts.json) {
@@ -305,8 +364,8 @@ if (failed.length) {
 	console.log();
 	for (const [message, where] of byMessage) {
 		io.error(`${message}  (${where.length} configuration${where.length == 1 ? '' : 's'})`);
-		for (const at of where.slice(0, 4)) console.error(styleText('gray', '    ' + at));
-		if (where.length > 4) console.error(styleText('gray', `    ...and ${where.length - 4} more`));
+		for (const at of where.slice(0, 4)) console.error(dim('    ' + at));
+		if (where.length > 4) console.error(dim(`    ...and ${where.length - 4} more`));
 	}
 
 	process.exit(1);

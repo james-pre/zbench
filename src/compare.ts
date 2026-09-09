@@ -32,19 +32,32 @@ export interface Delta {
 
 export interface ComparisonRow {
 	configuration: string;
-	/** Indexed the same as the states being compared, baseline first */
-	cells: Cell[];
+	/** Indexed by state first (baseline first), then by column */
+	cells: Cell[][];
+	/**
+	 * One per state, from the primary column.
+	 * The metrics of a matrix are proportional to each other, so every column would report the
+	 * same factor; taking it from one keeps the table free of repeated numbers.
+	 */
 	deltas: Delta[];
 }
 
+/** One matrix, with every column it reports lined up across the states being compared. */
 export interface Comparison {
 	test: Test;
 	/** Flag combination, empty when the test has no flags */
 	label: string;
-	column: Column;
+	/** Columns reported once per configuration. The first is the one `deltas` come from. */
+	columns: Column[];
 	rows: ComparisonRow[];
-	/** Present for aggregate metrics, which have one value per state rather than one per row */
-	aggregate?: ComparisonRow;
+	/** Columns reported once for the whole matrix rather than once per row */
+	aggregateColumns: Column[];
+	/** The single row those columns fill, when there are any */
+	aggregate: ComparisonRow | null;
+	/** Whether any row's factor beat both the threshold and the noise */
+	changed: boolean;
+	/** How many states produced at least one number here. Below 2 there is nothing to compare. */
+	reported: number;
 }
 
 function key(result: CaseResult): string {
@@ -56,13 +69,14 @@ function cell(column: Column, result: CaseResult | undefined): Cell {
 	return { value: column.value(result), noise: timing(result).rsd, missing: false };
 }
 
+const noDelta: Delta = { factor: null, change: null, significant: false, better: false };
+
 /**
  * Compare a cell against the baseline.
  * A change is only called out when it is bigger than both `threshold` and the two runs' combined noise.
  */
 export function delta(baseline: Cell, other: Cell, higherIsBetter: boolean, threshold: number): Delta {
-	if (baseline.value === null || other.value === null || !baseline.value)
-		return { factor: null, change: null, significant: false, better: false };
+	if (baseline.value === null || other.value === null || !baseline.value) return noDelta;
 
 	const factor = higherIsBetter ? other.value / baseline.value : baseline.value / other.value;
 	const change = ((other.value - baseline.value) / baseline.value) * 100;
@@ -77,8 +91,50 @@ export function delta(baseline: Cell, other: Cell, higherIsBetter: boolean, thre
 }
 
 /**
- * Line up every state's results against the baseline, one comparison per matrix column.
- * `ops/s` is left out because it is just the reciprocal of `avg`.
+ * The columns a comparison reports for a matrix.
+ * A test that marks any measurement with `compare` gets only those; otherwise everything but
+ * `ops/s`, which is just the reciprocal of `avg`.
+ */
+export function comparedColumns(matrix: Matrix): Column[] {
+	const all = columns(matrix);
+	const selected = all.filter(column => column.compare);
+	return selected.length ? selected : all.filter(column => column.label != 'ops/s');
+}
+
+/** Line up one configuration's cells across every state, with the primary column's delta. */
+function row(configuration: string, cells: Cell[][], primary: Column | undefined, threshold: number): ComparisonRow {
+	return {
+		configuration,
+		cells,
+		deltas: primary
+			? cells.map(c => delta(cells[0][0], c[0], primary.higherIsBetter, threshold))
+			: cells.map(() => noDelta),
+	};
+}
+
+/** The matrix-wide value for each state, compared the same way a row is. */
+function aggregateRow(matrix: Matrix, cols: Column[], refs: RefResults[], threshold: number): ComparisonRow {
+	const flags = JSON.stringify(matrix.flags);
+
+	const cells = refs.map((ref): Cell[] => {
+		const cases = ref.cases.filter(r => r.test == matrix.test.id && JSON.stringify(r.flags) == flags);
+		const noise = cases.filter(c => c.samples.length).map(c => timing(c).rsd);
+		// An aggregate spans the whole matrix, so its noise is the matrix's, not any one row's
+		const spread = noise.length ? noise.reduce((sum, v) => sum + v, 0) / noise.length : 0;
+
+		return cols.map((column): Cell => {
+			const total = column.total?.(cases) ?? null;
+			return { value: total, noise: spread, missing: total === null };
+		});
+	});
+
+	return row('aggregate', cells, cols[0], threshold);
+}
+
+/**
+ * Line up every state's results against the baseline, one comparison per matrix.
+ * Every column of a matrix lands in the same table, so a speedup factor is reported once rather
+ * than once per measurement.
  */
 export function compare(suite: Suite, refs: RefResults[], threshold: number): Comparison[] {
 	const [baseline, ...others] = refs;
@@ -89,48 +145,38 @@ export function compare(suite: Suite, refs: RefResults[], threshold: number): Co
 
 	for (const test of suite.tests) {
 		for (const matrix of matrices(test, baseline.cases)) {
-			for (const column of columns(matrix).filter(c => c.label != 'ops/s')) {
-				const rows = matrix.cases.map(result => {
-					const cells = indexes.map(index => cell(column, index.get(key(result))));
-					return {
-						configuration: result.configuration,
-						cells,
-						deltas: cells.map(c => delta(cells[0], c, column.higherIsBetter, threshold)),
-					};
-				});
+			const selected = comparedColumns(matrix);
+			const perRow = selected.filter(column => !column.aggregate);
+			const aggregateColumns = selected.filter(column => column.aggregate);
 
-				comparisons.push({
-					test,
-					label: matrix.label,
-					column,
-					rows: column.aggregate ? [] : rows,
-					aggregate: column.aggregate ? aggregateRow(matrix, column, refs, threshold) : undefined,
-				});
-			}
+			const rows = perRow.length
+				? matrix.cases.map(result =>
+						row(
+							result.configuration,
+							indexes.map(index => perRow.map(column => cell(column, index.get(key(result))))),
+							perRow[0],
+							threshold
+						)
+					)
+				: [];
+
+			const aggregate = aggregateColumns.length ? aggregateRow(matrix, aggregateColumns, refs, threshold) : null;
+
+			const all = aggregate ? [...rows, aggregate] : rows;
+
+			comparisons.push({
+				test,
+				label: matrix.label,
+				columns: perRow,
+				rows,
+				aggregateColumns,
+				aggregate,
+				// The baseline's delta against itself is never significant, so this only counts real changes
+				changed: all.some(r => r.deltas.some(d => d.significant)),
+				reported: refs.filter((_, r) => all.some(row => row.cells[r].some(c => c.value !== null))).length,
+			});
 		}
 	}
 
 	return comparisons;
-}
-
-/** The matrix-wide value for each state, compared the same way a row is. */
-function aggregateRow(matrix: Matrix, column: Column, refs: RefResults[], threshold: number): ComparisonRow {
-	const flags = JSON.stringify(matrix.flags);
-
-	const cells = refs.map((ref): Cell => {
-		const cases = ref.cases.filter(r => r.test == matrix.test.id && JSON.stringify(r.flags) == flags);
-		const total = column.total?.(cases) ?? null;
-		const noise = cases.filter(c => c.samples.length).map(c => timing(c).rsd);
-		return {
-			value: total,
-			noise: noise.length ? noise.reduce((sum, v) => sum + v, 0) / noise.length : 0,
-			missing: total === null,
-		};
-	});
-
-	return {
-		configuration: 'aggregate',
-		cells,
-		deltas: cells.map(c => delta(cells[0], c, column.higherIsBetter, threshold)),
-	};
 }

@@ -10,7 +10,7 @@ export type MeasureValue = boolean | Timespan;
  * How to turn one of a test's quantities into a reported measurement.
  * The quantity's amount per iteration comes from what `test` returns, falling back to the configuration value.
  */
-export interface MeasureSpec {
+export interface MeasureConfig {
 	/** `<unit>`s per `<timespan>` for each configuration, e.g. `MB/s` */
 	throughput?: MeasureValue;
 	/** `<unit>`s per `<timespan>` across every configuration in the matrix */
@@ -26,10 +26,15 @@ export interface MeasureSpec {
 	 * Defaults to 1, except for byte units (`MB`, `MiB`, ...), where amounts are taken to be bytes.
 	 */
 	scale?: number;
+	/**
+	 * If any of a test's measurements set this, comparison tables show only those columns,
+	 * and the first of them is the one speedup factors are computed from.
+	 */
+	compare?: boolean;
 }
 
 /** One point in a test's matrix. */
-export interface ConfigurationSpec {
+export interface CaseConfig {
 	/** Defaults to the configuration's values, e.g. `size=128, entries=1000` */
 	name?: string;
 	/**
@@ -43,13 +48,13 @@ export interface ConfigurationSpec {
 	value: Record<string, number>;
 }
 
-export interface TestSpec {
+export interface TestConfig {
 	/** Resolved relative to the config file */
 	path: string;
 	/** Defaults to `path` */
 	name?: string;
-	measure?: Record<string, MeasureSpec>;
-	configurations: ConfigurationSpec[];
+	measure?: Record<string, MeasureConfig>;
+	configurations: CaseConfig[];
 	/** Flags from the suite's pool to apply, or flags declared inline. The matrix runs once per combination. */
 	flags?: string[] | Record<string, unknown[]>;
 	iterations?: number;
@@ -67,7 +72,7 @@ export interface SuiteSpec {
 	build?: string;
 	/** Directory copied into a reference's worktree so every reference runs today's tests. Defaults to the config file's directory. */
 	root?: string;
-	tests: TestSpec[];
+	tests: TestConfig[];
 }
 
 /** Config files are looked for at these paths, in order, relative to the working directory. */
@@ -87,6 +92,8 @@ export interface Metric {
 	scale: number;
 	unit: string;
 	higherIsBetter: boolean;
+	/** Whether the measurement asked to be the one comparisons report */
+	compare: boolean;
 }
 
 /** A test with its defaults filled in and its measurements flattened into metrics. */
@@ -98,7 +105,7 @@ export interface Test {
 	/** Path as written, for display */
 	path: string;
 	metrics: Metric[];
-	configurations: Required<Pick<ConfigurationSpec, 'name' | 'cpu' | 'mem' | 'value'>>[];
+	configurations: Required<Pick<CaseConfig, 'name' | 'cpu' | 'mem' | 'value'>>[];
 	flags: Record<string, unknown[]>;
 	iterations: number;
 	warmup: number;
@@ -156,18 +163,29 @@ function parseMetrics(measure: unknown, path: string): Metric[] {
 		const at = `${path}.${key}`;
 		check(isRecord(raw), at, 'expected an object');
 
-		const spec = raw as MeasureSpec;
+		const spec = raw as MeasureConfig;
 		const unit = spec.unit ?? key;
 		check(typeof unit == 'string', `${at}.unit`, 'expected a string');
 		check(spec.scale === undefined || typeof spec.scale == 'number', `${at}.scale`, 'expected a number');
 		const scale = spec.scale ?? unitScale(unit);
+		check(spec.compare === undefined || typeof spec.compare == 'boolean', `${at}.compare`, 'expected a boolean');
+		const compare = spec.compare ?? false;
 
 		for (const kind of ['throughput', 'cost'] as const) {
 			for (const aggregate of [false, true]) {
 				const field = aggregate ? `aggregate_${kind}` : kind;
 				const span = parseMeasureValue((spec as Record<string, unknown>)[field], `${at}.${field}`);
 				if (span === undefined) continue;
-				metrics.push({ key, kind, aggregate, span, scale, unit, higherIsBetter: kind == 'throughput' });
+				metrics.push({
+					key,
+					kind,
+					aggregate,
+					span,
+					scale,
+					unit,
+					higherIsBetter: kind == 'throughput',
+					compare,
+				});
 			}
 		}
 
